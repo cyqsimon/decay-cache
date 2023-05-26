@@ -62,8 +62,10 @@ where
         W: Send + Unpin + AsyncWrite;
 
     /// Load (deserialise) the data structure from disk.
-    async fn load_from_disk(path: impl AsRef<Path> + Send) -> Result<Self, Error<Self::Err>> {
-        let file = OpenOptions::new().read(true).open(path).await?;
+    async fn load_from_disk(
+        path: impl AsRef<Path> + Send + Sync,
+    ) -> Result<Self, Error<Self::Err>> {
+        let file = OpenOptions::new().read(true).open(path.as_ref()).await?;
         let data = Self::load(file).await.map_err(Error::Serde)?;
         Ok(data)
     }
@@ -71,7 +73,7 @@ where
     /// Flush (serialise) the data structure to disk.
     async fn flush_to_disk(
         self: &Arc<Self>,
-        path: impl AsRef<Path> + Send,
+        path: impl AsRef<Path> + Send + Sync,
     ) -> Result<(), Error<Self::Err>>
     where
         Self: Send,
@@ -80,7 +82,7 @@ where
             .write(true)
             .create(true)
             .truncate(true)
-            .open(path)
+            .open(path.as_ref())
             .await?;
         self.flush(file).await.map_err(Error::Serde)?;
         Ok(())
@@ -89,8 +91,8 @@ where
     /// Delete the data structure from disk.
     ///
     /// Override this method if you wish to perform extra cleanup before deletion.
-    async fn delete(path: impl AsRef<Path> + Send) -> Result<(), Error<Self::Err>> {
-        fs::remove_file(path).await?;
+    async fn delete(path: impl AsRef<Path> + Send + Sync) -> Result<(), Error<Self::Err>> {
+        fs::remove_file(path.as_ref()).await?;
         Ok(())
     }
 }
