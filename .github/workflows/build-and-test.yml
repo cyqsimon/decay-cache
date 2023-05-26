@@ -1,0 +1,26 @@
+name: Build-and-test
+
+on:
+  push:
+    branches: ["master"]
+  pull_request:
+    branches: ["master"]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-and-test:
+    strategy:
+      matrix:
+        os: [windows-latest, ubuntu-latest, macos-latest]
+        feature-flag: [--no-default-features, null, --all-features]
+        mode-flag: [null, --release]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v3
+      - name: cargo build
+        run: cargo build ${{matrix.feature-flag}} ${{matrix.mode-flag}} --verbose
+      - name: cargo test
+        run: cargo test ${{matrix.feature-flag}} ${{matrix.mode-flag}} --verbose

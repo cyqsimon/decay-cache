@@ -9,6 +9,22 @@ name = "decay-cache"
 repository = "https://github.com/cyqsimon/decay-cache"
 version = "0.1.0"
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+[features]
+default = ["uuid-as-key"]
+utf8-paths = ["camino"]
+uuid-as-key = ["uuid"]
 
 [dependencies]
+async-trait = "0.1.68"
+camino = {version = "1.1.4", optional = true}
+lfu_cache = "1.3.0"
+thiserror = "1.0.40"
+uuid = {version = "1.3.3", optional = true, features = ["fast-rng", "v4"]}
+
+[dev-dependencies]
+fs_extra = "1.3.0"
+rand = "0.8.5"
+rstest = "0.17.0"
+temp-dir = "0.1.11"
+tokio = {version = "1.28.1", features = ["full"]}
+uuid = {version = "1.3.3", features = ["fast-rng", "v4"]}
