@@ -1,6 +1,7 @@
 use std::{
     borrow::Borrow,
     fmt::Debug,
+    hash::Hash,
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc,
@@ -80,8 +81,8 @@ where
 #[derive(Debug)]
 pub struct FileBackedLfuCache<K, T>
 where
-    K: Key,
-    T: AsyncFileRepr,
+    K: Clone + Eq + Hash + Key,
+    T: Send + Sync + AsyncFileRepr,
 {
     /// The storage directory for this cache.
     directory: PathBuf,
@@ -92,15 +93,15 @@ where
 
 impl<K, T> FileBackedLfuCache<K, T>
 where
-    K: Key,
-    T: AsyncFileRepr,
+    K: Clone + Eq + Hash + Key,
+    T: Send + Sync + AsyncFileRepr,
 {
     /// Initialise a cache with a specific capacity, using the given path as
     /// the backing directory.
     ///
     /// The provided path must exist and resolve to a directory. Otherwise
     /// an error will be returned.
-    pub fn init(path: impl AsRef<Path>, capacity: usize) -> Result<Self, Error<K, T::Err>> {
+    pub fn init(path: impl AsRef<Path>, capacity: usize) -> Result<Self, Error<T::Err>> {
         let path = path.as_ref().to_owned();
         if !(path.is_dir() || path.canonicalize().map(|p| p.is_dir()).unwrap_or(false)) {
             return Err(Error::Init(path));
@@ -147,13 +148,13 @@ where
 
     /// Get an item from cache (if present) using its unique key, and increment
     /// its usage frequency.
-    pub fn get(&mut self, key: impl Borrow<K>) -> Result<Arc<T>, Error<K, T::Err>> {
+    pub fn get(&mut self, key: impl Borrow<K>) -> Result<Arc<T>, Error<T::Err>> {
         let key = key.borrow();
 
         self.cache
             .get(key)
             .map(|item| Arc::clone(&item.content))
-            .ok_or(Error::NotInCache(key.clone()))
+            .ok_or(Error::NotInCache(Box::new(key.clone())))
     }
 
     /// Get a mutable reference to an item from the cache using its unique key,
@@ -161,11 +162,11 @@ where
     ///
     /// If there exists other `Arc`s that point to this item, this function will error
     /// because it's not safe to mutate a shared value.
-    pub fn get_mut(&mut self, key: impl Borrow<K>) -> Result<&mut T, Error<K, T::Err>> {
+    pub fn get_mut(&mut self, key: impl Borrow<K>) -> Result<&mut T, Error<T::Err>> {
         let key = key.borrow();
 
         let Some(CacheItem { needs_flush, content }) = self.cache.get_mut(key) else {
-            Err(Error::NotInCache(key.clone()))?
+            Err(Error::NotInCache(Box::new(key.clone())))?
         };
 
         let mut_ref = match Arc::get_mut(content) {
@@ -173,7 +174,7 @@ where
                 needs_flush.store(true, Ordering::Relaxed);
                 r
             }
-            None => Err(Error::Immutable(key.clone()))?,
+            None => Err(Error::Immutable(Box::new(key.clone())))?,
         };
 
         Ok(mut_ref)
@@ -183,7 +184,7 @@ where
     /// load it into cache first and then return it.
     ///
     /// Usage frequency is incremented in both cases. Eviction will happen if necessary.
-    pub async fn get_or_load(&mut self, key: impl Borrow<K>) -> Result<Arc<T>, Error<K, T::Err>> {
+    pub async fn get_or_load(&mut self, key: impl Borrow<K>) -> Result<Arc<T>, Error<T::Err>> {
         let key = key.borrow();
 
         // lookup cache, retrieve if loaded
@@ -192,7 +193,9 @@ where
         }
 
         // load from disk
-        let item = self.read_from_disk(key, Error::NotFound).await?;
+        let item = self
+            .read_from_disk(key, |k| Error::NotFound(Box::new(k)))
+            .await?;
         let content = Arc::clone(&item.content);
 
         // insert
@@ -209,15 +212,14 @@ where
     ///
     /// If there exists other `Arc`s that point to this item, this function will error
     /// because it's not safe to mutate a shared value.
-    pub async fn get_or_load_mut(
-        &mut self,
-        key: impl Borrow<K>,
-    ) -> Result<&mut T, Error<K, T::Err>> {
+    pub async fn get_or_load_mut(&mut self, key: impl Borrow<K>) -> Result<&mut T, Error<T::Err>> {
         let key = key.borrow();
 
         // lookup cache, load from disk if not found
         if !self.has_loaded_key(key) {
-            let item = self.read_from_disk(key, Error::NotFound).await?;
+            let item = self
+                .read_from_disk(key, |k| Error::NotFound(Box::new(k)))
+                .await?;
             self.insert_and_handle_eviction(key.clone(), item).await?;
         }
 
@@ -232,7 +234,7 @@ where
                 needs_flush.store(true, Ordering::Relaxed);
                 r
             }
-            None => Err(Error::Immutable(key.clone()))?,
+            None => Err(Error::Immutable(Box::new(key.clone())))?,
         };
 
         Ok(mut_ref)
@@ -244,7 +246,7 @@ where
     ///
     /// Note that the newly added item will not be immediately flushed
     /// to the backing directory on disk.
-    pub async fn push(&mut self, item: T) -> Result<K, Error<K, T::Err>> {
+    pub async fn push(&mut self, item: T) -> Result<K, Error<T::Err>> {
         let key = K::new();
 
         // insert
@@ -259,12 +261,12 @@ where
     ///
     /// Neither frequency increment nor eviction will not occur. Hence this method
     /// does not require a mutable reference to self.
-    pub async fn direct_flush(&self, item: T) -> Result<K, Error<K, T::Err>> {
+    pub async fn direct_flush(&self, item: T) -> Result<K, Error<T::Err>> {
         let key = K::new();
         let flush_path = self.get_path_for(&key);
 
         // flush
-        Arc::new(item).flush(flush_path).await?;
+        Arc::new(item).flush_to_disk(flush_path).await?;
 
         Ok(key)
     }
@@ -273,19 +275,19 @@ where
     ///
     /// The flushed item neither has its frequency incremented, nor will it be evicted.
     /// Hence this method does not require a mutable reference to self.
-    pub async fn flush(&self, key: impl Borrow<K>) -> Result<(), Error<K, T::Err>> {
+    pub async fn flush(&self, key: impl Borrow<K>) -> Result<(), Error<T::Err>> {
         let key = key.borrow();
 
         let CacheItem { needs_flush, content } = self
             .cache
             .peek_iter()
             .find_map(|(k, v)| (k == key).then_some(v))
-            .ok_or(Error::NotInCache(key.clone()))?;
+            .ok_or(Error::NotInCache(Box::new(key.clone())))?;
 
         // flush only if necessary
         if needs_flush.load(Ordering::Acquire) {
             let flush_path = self.get_path_for(key);
-            content.flush(flush_path).await?;
+            content.flush_to_disk(flush_path).await?;
             needs_flush.store(false, Ordering::Release);
         }
 
@@ -300,14 +302,14 @@ where
     /// Note that this method does not fail fast. Instead it makes a flush attempt
     /// on all items in cache, then collects and returns all errors encountered (if any).
     /// Therefore a partial failure is possible (and is likely).
-    pub async fn flush_all(&self) -> Result<(), Vec<Error<K, T::Err>>> {
+    pub async fn flush_all(&self) -> Result<(), Vec<Error<T::Err>>> {
         let mut errors = vec![];
 
         for (key, CacheItem { needs_flush, content }) in self.cache.peek_iter() {
             // flush only if necessary
             if needs_flush.load(Ordering::Acquire) {
                 let flush_path = self.get_path_for(key);
-                if let Err(err) = content.flush(flush_path).await {
+                if let Err(err) = content.flush_to_disk(flush_path).await {
                     errors.push(err.into());
                 }
                 needs_flush.store(false, Ordering::Release);
@@ -323,7 +325,7 @@ where
 
     /// Evict all items from cache, and optionally flushing all of them
     /// to the backing directory on disk.
-    pub async fn clear_cache(&mut self, do_flush: bool) -> Result<(), Vec<Error<K, T::Err>>> {
+    pub async fn clear_cache(&mut self, do_flush: bool) -> Result<(), Vec<Error<T::Err>>> {
         if do_flush {
             self.flush_all().await?;
         }
@@ -333,11 +335,11 @@ where
     }
 
     /// Delete an item from both the cache and the backing directory on disk.
-    pub async fn delete(&mut self, key: impl Borrow<K>) -> Result<(), Error<K, T::Err>> {
+    pub async fn delete(&mut self, key: impl Borrow<K>) -> Result<(), Error<T::Err>> {
         let key = key.borrow();
 
         if !self.has_key(key) {
-            Err(Error::NotFound(key.clone()))?
+            Err(Error::NotFound(Box::new(key.clone())))?
         }
 
         // remove from cache
@@ -361,9 +363,9 @@ where
         &self,
         key: impl Borrow<K>,
         not_found_variant: F,
-    ) -> Result<CacheItem<T>, Error<K, T::Err>>
+    ) -> Result<CacheItem<T>, Error<T::Err>>
     where
-        F: FnOnce(K) -> Error<K, T::Err>,
+        F: FnOnce(K) -> Error<T::Err>,
     {
         let key = key.borrow();
 
@@ -371,7 +373,7 @@ where
         if !load_path.is_file() {
             Err(not_found_variant(key.clone()))?
         }
-        let content = T::load(load_path).await?;
+        let content = T::load_from_disk(load_path).await?;
         let item = CacheItem::new_loaded(content);
 
         Ok(item)
@@ -386,7 +388,7 @@ where
         &mut self,
         key: K,
         item: CacheItem<T>,
-    ) -> Result<(), T::Err> {
+    ) -> Result<(), Error<T::Err>> {
         assert!(!self.has_loaded_key(&key), "key already present in cache");
 
         // when peek_lfu_key() returns `Some`, it just means there is at least 1 item;
@@ -399,7 +401,7 @@ where
                 // flush only if necessary
                 if needs_flush.load(Ordering::Relaxed) {
                     let flush_path = self.get_path_for(key);
-                    content.flush(flush_path).await?;
+                    content.flush_to_disk(flush_path).await?;
                 }
             }
             (_, None) => {

@@ -6,7 +6,7 @@ use rand::Rng;
 use rstest::{fixture, rstest};
 use temp_dir::TempDir;
 use tokio::{
-    io::{AsyncBufReadExt, BufReader},
+    io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader},
     time,
 };
 use uuid::Uuid;
@@ -37,10 +37,11 @@ impl<'a> FromIterator<&'a str> for AllLines {
 impl AsyncFileRepr for AllLines {
     type Err = TestError;
 
-    async fn load(path: impl AsRef<Path> + Send) -> Result<Self, Self::Err> {
-        let path = path.as_ref();
-
-        let mut lines = BufReader::new(tokio::fs::File::open(path).await?).lines();
+    async fn load<R>(reader: R) -> Result<Self, Self::Err>
+    where
+        R: Send + Unpin + AsyncRead,
+    {
+        let mut lines = BufReader::new(reader).lines();
         let mut v = vec![];
         while let Some(line) = lines.next_line().await? {
             v.push(line);
@@ -49,19 +50,12 @@ impl AsyncFileRepr for AllLines {
         Ok(Self(v))
     }
 
-    async fn flush(self: &Arc<Self>, path: impl AsRef<Path> + Send) -> Result<(), Self::Err> {
-        let path = path.as_ref();
-
+    async fn flush<W>(self: &Arc<Self>, mut writer: W) -> Result<(), Self::Err>
+    where
+        W: Send + Unpin + AsyncWrite,
+    {
         let content = self.0.join("\n") + "\n";
-        tokio::fs::write(path, content).await?;
-
-        Ok(())
-    }
-
-    async fn delete(path: impl AsRef<Path> + Send) -> Result<(), Self::Err> {
-        let path = path.as_ref();
-
-        tokio::fs::remove_file(path).await?;
+        writer.write(content.as_ref()).await?;
 
         Ok(())
     }

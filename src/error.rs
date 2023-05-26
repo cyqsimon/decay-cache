@@ -1,12 +1,11 @@
-use std::fmt;
+use std::{fmt, io};
 
 use crate::{traits::Key, PathBuf};
 
 /// Errors produced by `FileBackedLfuCache`.
 #[derive(Debug, thiserror::Error)]
-pub enum Error<K, E>
+pub enum Error<E>
 where
-    K: Key,
     E: std::error::Error,
 {
     /// Cannot initialise the given path as a backing directory.
@@ -15,28 +14,30 @@ where
     Init(PathBuf),
 
     /// An item cannot be found with this key in cache.
-    NotInCache(K),
+    NotInCache(Box<dyn Key>),
 
     /// An item cannot be found with this key on disk.
-    NotOnDisk(K),
+    NotOnDisk(Box<dyn Key>),
 
     /// An item cannot be found with this key either in cache or on disk.
-    NotFound(K),
+    NotFound(Box<dyn Key>),
 
-    /// An error occurred when performing file operations.
+    /// An error occurred while serialising/deserialising.
     ///
     /// The inner type is the user-defined associated type of `AsyncFileRepr`.
-    FileOp(E),
+    Serde(E),
+
+    /// An error occurred while performing IO.
+    Io(io::Error),
 
     /// An item with this key is temporarily immutable due to outstanding references.
     ///
     /// This can happen if you are holding a reference elsewhere, or if this item
     /// is in the process of being flushed to disk.
-    Immutable(K),
+    Immutable(Box<dyn Key>),
 }
-impl<K, E> fmt::Display for Error<K, E>
+impl<E> fmt::Display for Error<E>
 where
-    K: Key,
     E: std::error::Error,
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -49,8 +50,11 @@ where
             NotFound(key) => {
                 format!("Cannot find an item with key {key:?} either in cache or on disk")
             }
-            FileOp(error) => {
-                format!("An error occurred when performing file operations: {error}")
+            Serde(error) => {
+                format!("An error occurred during serialisation/deserialisation: {error}")
+            }
+            Io(error) => {
+                format!("An error occurred while performing IO: {error}")
             }
             Immutable(key) => format!(
                 "An item with key {key:?} is temporarily immutable due to outstanding references"
@@ -60,12 +64,11 @@ where
         write!(f, "{repr}")
     }
 }
-impl<K, E> From<E> for Error<K, E>
+impl<E> From<io::Error> for Error<E>
 where
-    K: Key,
     E: std::error::Error,
 {
-    fn from(err: E) -> Self {
-        Self::FileOp(err)
+    fn from(err: io::Error) -> Self {
+        Self::Io(err)
     }
 }
