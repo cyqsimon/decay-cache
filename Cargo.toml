@@ -1,0 +1,14 @@
+[package]
+authors = ["cyqsimon <28627918+cyqsimon@users.noreply.github.com>"]
+categories = ["asynchronous", "caching", "filesystem"]
+description = "A Redis-like file cache library"
+edition = "2021"
+keywords = ["file-cache"]
+license = "MIT"
+name = "decay-cache"
+repository = "https://github.com/cyqsimon/decay-cache"
+version = "0.1.0"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
