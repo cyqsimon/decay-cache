@@ -301,7 +301,7 @@ where
     ///
     /// Note that this method does not fail fast. Instead it makes a flush attempt
     /// on all items in cache, then collects and returns all errors encountered (if any).
-    /// Therefore a partial failure is possible (and is likely).
+    /// Therefore any failure is possibly (and likely) a partial failure.
     pub async fn flush_all(&self) -> Result<(), Vec<Error<T::Err>>> {
         let mut errors = vec![];
 
