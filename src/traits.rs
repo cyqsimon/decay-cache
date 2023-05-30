@@ -15,7 +15,7 @@ use crate::{Error, Path};
 /// UUIDv4 for most use cases.
 pub trait Key
 where
-    Self: Debug + 'static,
+    Self: Debug + Send + Sync + 'static,
 {
     /// Generate a new, unique key.
     fn new() -> Self
